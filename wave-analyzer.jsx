@@ -473,6 +473,49 @@ function cleanReport(r) {
   return cleaned;
 }
 
+// 用本地量化结果给 AI 报告做最小一致性兜底，避免长线用户在上升趋势中被过度摇摆建议干扰
+function applyConsistencyGuards(report, akData) {
+  if (!report || !akData) return report;
+  try {
+    const raw = akData.charCodeAt(0) === 0xFEFF ? akData.slice(1) : akData;
+    const parsed = JSON.parse(raw.replace(/\bNaN\b/g, "null"));
+    const ws = parsed?.wave_signals;
+    if (!ws) return report;
+
+    const guarded = { ...report };
+    const aiAction = guarded.action;
+    const pyAction = ws.action;
+
+    const aiHasBuySignal = Array.isArray(guarded.key_signals)
+      && guarded.key_signals.some(s => s?.type === "buy");
+    const localHasBuySignal = Array.isArray(ws.signals)
+      && ws.signals.some(s => s?.type === "buy" && (Number(s?.weight) || 0) > 0);
+    const hasBuySignal = aiHasBuySignal || localHasBuySignal;
+
+    // 分数字段以本地量化层为准，避免模型复述误差导致展示层自相矛盾
+    if (typeof ws.sell_score === "number") guarded.sell_score = ws.sell_score;
+    if (typeof ws.buy_score === "number")  guarded.buy_score  = ws.buy_score;
+    if (typeof ws.net_score === "number")  guarded.net_score  = ws.net_score;
+
+    const aiIsNonSell = ["HOLD", "WATCH_BUY", "BUY_ADD"].includes(aiAction);
+
+    // 与系统提示词保持一致：本地已给出 SELL/WATCH_SELL，且没有 buy 抵消信号时，不得被 AI 弱化。
+    // 这里不只拦 HOLD，也拦截直接跳到 BUY 方向的情况，避免长线用户在风险未消时过早乐观。
+    if (["SELL_WAVE", "WATCH_SELL"].includes(pyAction) && aiIsNonSell && !hasBuySignal) {
+      guarded.action = pyAction;
+      // action 被修正时同步修正摘要，避免出现“动作已改成 SELL，但文案仍写 HOLD”的自相矛盾。
+      guarded.action_summary = pyAction === "SELL_WAVE"
+        ? "下行风险较强，暂不宜放松警惕"
+        : "下行风险未完全解除，先观察为主";
+    }
+
+    return guarded;
+  } catch {
+    return report;
+  }
+}
+
+
 async function fetchAnalysis(stockName, stockCode, akData, userContext, onStatus) {
   const id     = stockCode ? `${stockName}（${stockCode}）` : stockName;
   const ctxLine = userContext?.trim() ? `\n\n【用户当前情况】${userContext.trim()}` : "";
@@ -484,7 +527,8 @@ async function fetchAnalysis(stockName, stockCode, akData, userContext, onStatus
   const msg = payload
     ? `分析股票：${id}${ctxLine}${dateLine}\n\nAKShare本地数据：\n${payload}\n\n请同时搜索近期实质性事件（公告/业绩/异动），给出波段建议。`
     : `分析股票：${id}${ctxLine}${dateLine}，请搜索近期行情、公告和实质性事件，给出波段操作建议。`;
-  return cleanReport(extractJSON(await runWithTools([{ role: "user", content: msg }], SYSTEM, onStatus)));
+  const rawReport = cleanReport(extractJSON(await runWithTools([{ role: "user", content: msg }], SYSTEM, onStatus)));
+  return applyConsistencyGuards(rawReport, akData);
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -850,7 +894,7 @@ export default function App() {
               <button
                 onClick={handleLookup}
                 disabled={looking || !query.trim()}
-                style={{ background:looking?"rgba(30,144,255,.1)":"rgba(30,144,255,0.15)", border:"1px solid rgba(30,144,255,0.3)", borderRadius:12, padding:"13px 20px", color:"#1e90ff", fontSize:14, fontWeight:600, cursor:looking||!query.trim()?"default":"pointer", opacity:!query.trim()&&!looking?.4:1, whiteSpace:"nowrap", transition:"all .2s" }}
+                style={{ background:looking?"rgba(30,144,255,.1)":"rgba(30,144,255,0.15)", border:"1px solid rgba(30,144,255,0.3)", borderRadius:12, padding:"13px 20px", color:"#1e90ff", fontSize:14, fontWeight:600, cursor:looking||!query.trim()?"default":"pointer", opacity:!query.trim() && !looking ? 0.4 : 1, whiteSpace:"nowrap", transition:"all .2s" }}
               >
                 {looking
                   ? <span style={{ display:"flex", alignItems:"center", gap:7 }}>
