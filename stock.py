@@ -808,13 +808,24 @@ def detect(df_d, df_60, money, idx, weights):
     sell = sum(s["weight"] for s in signals if s["type"] == "sell")
     buy  = sum(s["weight"] for s in signals if s["type"] == "buy")
     net  = buy - sell
+
+    # 长线场景下，强势上涨中对卖出更谨慎，降低“卖飞”概率：
+    # - 普通环境：net<=-3 才 SELL_WAVE
+    # - 上涨趋势：net<=-4 才 SELL_WAVE，-3 先 WATCH_SELL
+    sell_wave_thresh = -4 if in_uptrend else -3
+    watch_sell_thresh = -3 if in_uptrend else -2
     buy_thresh = 3 if index_adj >= 0 else 4
 
-    if   net <= -3:            action, cn = "SELL_WAVE",  "建议先抛"
-    elif net <= -2:            action, cn = "WATCH_SELL", "留意下行风险"
-    elif net >= buy_thresh:    action, cn = "BUY_ADD",    "可考虑买回/加仓"
-    elif net >= 2:             action, cn = "WATCH_BUY",  "关注加仓机会"
-    else:                      action, cn = "HOLD",       "持有不动"
+    # 避免“只防卖飞”带来的买入过保守：
+    # 上涨趋势且非弱市时，WATCH_BUY 提前一档（net>=1），让空仓/轻仓有更早试探机会；
+    # BUY_ADD 阈值不变，仍需更强确认，避免追高。
+    watch_buy_thresh = 1 if (in_uptrend and index_adj >= 0) else 2
+
+    if   net <= sell_wave_thresh:   action, cn = "SELL_WAVE",  "建议先抛"
+    elif net <= watch_sell_thresh:  action, cn = "WATCH_SELL", "留意下行风险"
+    elif net >= buy_thresh:         action, cn = "BUY_ADD",    "可考虑买回/加仓"
+    elif net >= watch_buy_thresh:   action, cn = "WATCH_BUY",  "关注加仓机会"
+    else:                           action, cn = "HOLD",       "持有不动"
 
     return {
         "action": action, "action_cn": cn,

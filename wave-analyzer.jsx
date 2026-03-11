@@ -341,10 +341,10 @@ HOLD 的含义：主动判断——技术面无明显方向，无论涨跌幅度
   · shape_desc：K线形态自然语言描述，直接作为技术判断基础
   · wave_signals：Python 机械评分结果
     net_score 与 action 的完整映射（弱市指 index_weak 信号存在时）：
-      net_score ≤ -3              → SELL_WAVE
-      net_score = -2              → WATCH_SELL
-      net_score = -1 / 0 / 1     → HOLD
-      net_score = 2               → WATCH_BUY
+      常规：net_score ≤ -3 → SELL_WAVE，net_score = -2 → WATCH_SELL
+      若 in_uptrend=true：卖出阈值上调一档（net_score ≤ -4 才 SELL_WAVE，net_score = -3 为 WATCH_SELL）
+      若 in_uptrend=true 且非弱市（无 index_weak）：WATCH_BUY 提前一档（net_score ≥ 1）
+      其余情形：net_score = -1 / 0 / 1 → HOLD，net_score = 2 → WATCH_BUY
       net_score ≥ 3（弱市≥4）    → BUY_ADD
     你对 action 的最终判断应与 net_score 落在同一档，只允许因搜索结果升降一档。
     - net_score ≤ -3 → Python 已判断为 SELL_WAVE，你需要结合搜索判断是否维持或降级
@@ -473,6 +473,49 @@ function cleanReport(r) {
   return cleaned;
 }
 
+// 用本地量化结果给 AI 报告做最小一致性兜底，避免长线用户在上升趋势中被过度摇摆建议干扰
+function applyConsistencyGuards(report, akData) {
+  if (!report || !akData) return report;
+  try {
+    const raw = akData.charCodeAt(0) === 0xFEFF ? akData.slice(1) : akData;
+    const parsed = JSON.parse(raw.replace(/\bNaN\b/g, "null"));
+    const ws = parsed?.wave_signals;
+    if (!ws) return report;
+
+    const guarded = { ...report };
+    const aiAction = guarded.action;
+    const pyAction = ws.action;
+
+    const aiHasBuySignal = Array.isArray(guarded.key_signals)
+      && guarded.key_signals.some(s => s?.type === "buy");
+    const localHasBuySignal = Array.isArray(ws.signals)
+      && ws.signals.some(s => s?.type === "buy" && (Number(s?.weight) || 0) > 0);
+    const hasBuySignal = aiHasBuySignal || localHasBuySignal;
+
+    // 分数字段以本地量化层为准，避免模型复述误差导致展示层自相矛盾
+    if (typeof ws.sell_score === "number") guarded.sell_score = ws.sell_score;
+    if (typeof ws.buy_score === "number")  guarded.buy_score  = ws.buy_score;
+    if (typeof ws.net_score === "number")  guarded.net_score  = ws.net_score;
+
+    const aiIsNonSell = ["HOLD", "WATCH_BUY", "BUY_ADD"].includes(aiAction);
+
+    // 与系统提示词保持一致：本地已给出 SELL/WATCH_SELL，且没有 buy 抵消信号时，不得被 AI 弱化。
+    // 这里不只拦 HOLD，也拦截直接跳到 BUY 方向的情况，避免长线用户在风险未消时过早乐观。
+    if (["SELL_WAVE", "WATCH_SELL"].includes(pyAction) && aiIsNonSell && !hasBuySignal) {
+      guarded.action = pyAction;
+      // action 被修正时同步修正摘要，避免出现“动作已改成 SELL，但文案仍写 HOLD”的自相矛盾。
+      guarded.action_summary = pyAction === "SELL_WAVE"
+        ? "下行风险较强，暂不宜放松警惕"
+        : "下行风险未完全解除，先观察为主";
+    }
+
+    return guarded;
+  } catch {
+    return report;
+  }
+}
+
+
 async function fetchAnalysis(stockName, stockCode, akData, userContext, onStatus) {
   const id     = stockCode ? `${stockName}（${stockCode}）` : stockName;
   const ctxLine = userContext?.trim() ? `\n\n【用户当前情况】${userContext.trim()}` : "";
@@ -484,7 +527,8 @@ async function fetchAnalysis(stockName, stockCode, akData, userContext, onStatus
   const msg = payload
     ? `分析股票：${id}${ctxLine}${dateLine}\n\nAKShare本地数据：\n${payload}\n\n请同时搜索近期实质性事件（公告/业绩/异动），给出波段建议。`
     : `分析股票：${id}${ctxLine}${dateLine}，请搜索近期行情、公告和实质性事件，给出波段操作建议。`;
-  return cleanReport(extractJSON(await runWithTools([{ role: "user", content: msg }], SYSTEM, onStatus)));
+  const rawReport = cleanReport(extractJSON(await runWithTools([{ role: "user", content: msg }], SYSTEM, onStatus)));
+  return applyConsistencyGuards(rawReport, akData);
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -850,7 +894,7 @@ export default function App() {
               <button
                 onClick={handleLookup}
                 disabled={looking || !query.trim()}
-                style={{ background:looking?"rgba(30,144,255,.1)":"rgba(30,144,255,0.15)", border:"1px solid rgba(30,144,255,0.3)", borderRadius:12, padding:"13px 20px", color:"#1e90ff", fontSize:14, fontWeight:600, cursor:looking||!query.trim()?"default":"pointer", opacity:!query.trim()&&!looking?.4:1, whiteSpace:"nowrap", transition:"all .2s" }}
+                style={{ background:looking?"rgba(30,144,255,.1)":"rgba(30,144,255,0.15)", border:"1px solid rgba(30,144,255,0.3)", borderRadius:12, padding:"13px 20px", color:"#1e90ff", fontSize:14, fontWeight:600, cursor:looking||!query.trim()?"default":"pointer", opacity:!query.trim() && !looking ? 0.4 : 1, whiteSpace:"nowrap", transition:"all .2s" }}
               >
                 {looking
                   ? <span style={{ display:"flex", alignItems:"center", gap:7 }}>
