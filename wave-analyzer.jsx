@@ -341,10 +341,10 @@ HOLD 的含义：主动判断——技术面无明显方向，无论涨跌幅度
   · shape_desc：K线形态自然语言描述，直接作为技术判断基础
   · wave_signals：Python 机械评分结果
     net_score 与 action 的完整映射（弱市指 index_weak 信号存在时）：
-      net_score ≤ -3              → SELL_WAVE
-      net_score = -2              → WATCH_SELL
-      net_score = -1 / 0 / 1     → HOLD
-      net_score = 2               → WATCH_BUY
+      常规：net_score ≤ -3 → SELL_WAVE，net_score = -2 → WATCH_SELL
+      若 in_uptrend=true：卖出阈值上调一档（net_score ≤ -4 才 SELL_WAVE，net_score = -3 为 WATCH_SELL）
+      若 in_uptrend=true 且非弱市（无 index_weak）：WATCH_BUY 提前一档（net_score ≥ 1）
+      其余情形：net_score = -1 / 0 / 1 → HOLD，net_score = 2 → WATCH_BUY
       net_score ≥ 3（弱市≥4）    → BUY_ADD
     你对 action 的最终判断应与 net_score 落在同一档，只允许因搜索结果升降一档。
     - net_score ≤ -3 → Python 已判断为 SELL_WAVE，你需要结合搜索判断是否维持或降级
